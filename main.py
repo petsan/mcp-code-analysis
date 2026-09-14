@@ -635,6 +635,7 @@ main{max-width:880px;margin:60px auto;padding:0 24px}h1{font-size:44px;margin:12
 p{color:#b8c8d6;line-height:1.6}.badge{color:#7be0ba}section{background:#192634;border:1px solid #324253;border-radius:16px;padding:24px;margin:24px 0}
 label{display:block;margin:16px 0 8px}input,textarea{box-sizing:border-box;width:100%;padding:12px;background:#101923;color:#e9f0f6;border:1px solid #506277;border-radius:8px;font:15px monospace}textarea{min-height:160px}
 button{padding:12px 22px;margin-top:18px;background:#7be0ba;color:#10271f;border:0;border-radius:8px;font-weight:700;cursor:pointer}button:disabled{opacity:.5}pre{white-space:pre-wrap;overflow-wrap:anywhere}a{color:#7be0ba}
+.finding{background:#101923;border:1px solid #324253;border-radius:10px;padding:16px;margin:12px 0}.finding p{margin:10px 0 0;color:#e9f0f6}.finding small{display:block;color:#b8c8d6;margin-top:8px;overflow-wrap:anywhere}.pill{display:inline-block;border-radius:5px;padding:3px 8px;margin-right:8px;font-size:12px;font-weight:700;text-transform:uppercase;background:#34475a;color:#dbeafa}.pill.error{background:#592d37;color:#ffb8c4}.pill.warning{background:#514128;color:#ffdc97}.summary{font-size:20px;font-weight:650;margin:20px 0 8px}.scan-error{border-color:#b18a48}details{margin-top:20px;border-top:1px solid #324253;padding-top:16px}summary{cursor:pointer;color:#7be0ba}summary:focus-visible{outline:2px solid #7be0ba;outline-offset:4px}#result{margin-top:20px}
 </style><main><span class="badge" id="health">Checking server…</span>
 <h1>Code analysis, live.</h1><p>Try a Python snippet with Ruff and Semgrep. Find lint issues and potential security problems without executing the code.</p>
 <section><h2>Try the analyzers</h2><p>Enter your demo access token to run a live scan. It stays in this page's memory and is sent only to this server.</p>
@@ -642,12 +643,29 @@ button{padding:12px 22px;margin-top:18px;background:#7be0ba;color:#10271f;border
 <label for="code">Python snippet</label><textarea id="code" spellcheck="false">import os
 password = "example-only"
 eval("1 + 1")</textarea><button id="run">Analyze snippet</button></form>
-<pre id="result" role="status" aria-live="polite">Results will appear here.</pre></section>
+<div id="result" role="status" aria-live="polite">Results will appear here.</div><details id="raw" hidden><summary>View raw JSON</summary><pre id="raw-json"></pre></details></section>
 <section><h2>Connect an MCP client</h2><p>Transport: SSE<br>Endpoint: <code id="endpoint"></code><br>Header: <code>Authorization: Bearer YOUR_TOKEN</code></p><p>Tools: analyze_code_snippet · analyze_github_repo</p></section></main>
 <script>
 document.getElementById('endpoint').textContent=location.origin+'/sse';
 fetch('/healthz').then(r=>{if(!r.ok)throw Error();return r.json()}).then(()=>document.getElementById('health').textContent='● Server online').catch(()=>document.getElementById('health').textContent='Server is waking up. Refresh in a moment.');
-document.getElementById('scan').onsubmit=async e=>{e.preventDefault();const out=document.getElementById('result'),button=document.getElementById('run');button.disabled=true;out.textContent='Analyzing…';try{const token=document.getElementById('token').value.trim().replace(/^Bearer +/i,'');const r=await fetch('/demo/scan',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({filename:'example.py',code:document.getElementById('code').value})});if(r.status===401){out.textContent='That token was not recognized. Check your demo access token and try again.';return}if(!r.ok)throw Error('Scan unavailable ('+r.status+'). Please try again.');const data=await r.json();out.textContent=JSON.stringify(data,null,2)}catch(err){out.textContent=err.message}finally{button.disabled=false}};
+function node(tag,text,className){const el=document.createElement(tag);el.textContent=text;if(className)el.className=className;return el}
+function renderResults(data){
+ const out=document.getElementById('result');out.replaceChildren();
+ const findings=data.findings||[],errors=data.errors||[];
+ out.append(node('div',findings.length+' finding'+(findings.length===1?'':'s')+(errors.length?' · Scan incomplete':''),'summary'));
+ if(!findings.length)out.append(node('p',errors.length?'No findings returned. Review the scan errors below.':'No issues found by the configured rules.'));
+ for(const finding of findings){
+  const card=node('article','','finding'),severity=String(finding.severity||'info').toLowerCase();
+  card.append(node('span',severity,'pill '+(['error','warning'].includes(severity)?severity:'')),node('span',finding.tool||'Analyzer','pill'));
+  card.append(node('p',finding.message||finding.parse_error||'Finding returned without a description.'));
+  const file=String(finding.filename||data.filename||'').split('/').pop();
+  card.append(node('small',[file,finding.line?'Line '+finding.line+(finding.column?', column '+finding.column:''):'',finding.rule||''].filter(Boolean).join(' · ')));out.append(card);
+ }
+ for(const error of errors){const card=node('article','','finding scan-error');card.append(node('strong',(error.tool||'Analyzer')+' could not complete'),node('p',error.error||String(error)));out.append(card)}
+ if(data.error)out.append(node('p',data.error));
+ document.getElementById('raw-json').textContent=JSON.stringify(data,null,2);document.getElementById('raw').hidden=false;
+}
+document.getElementById('scan').onsubmit=async e=>{e.preventDefault();const out=document.getElementById('result'),button=document.getElementById('run'),raw=document.getElementById('raw');raw.hidden=true;raw.open=false;button.disabled=true;out.textContent='Analyzing…';try{const token=document.getElementById('token').value.trim().replace(/^Bearer +/i,'');const r=await fetch('/demo/scan',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({filename:'example.py',code:document.getElementById('code').value})});if(r.status===401){out.textContent='That token was not recognized. Check your demo access token and try again.';return}if(!r.ok)throw Error('Scan unavailable ('+r.status+'). Please try again.');renderResults(await r.json())}catch(err){out.textContent=err.message}finally{button.disabled=false}};
 </script></html>'''
 
 
