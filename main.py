@@ -40,7 +40,7 @@ from mcp.server.sse import SseServerTransport
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -519,6 +519,15 @@ class BearerAuthMiddleware:
             return
 
         path = scope.get("path", "")
+        headers = dict(scope.get("headers") or [])
+        if scope.get("method") == "GET" and (
+            path == "/" or (
+                path == "/sse" and b"text/html" in headers.get(b"accept", b"")
+                and b"text/event-stream" not in headers.get(b"accept", b"")
+            )
+        ):
+            await demo_page(Request(scope))(scope, receive, send)
+            return
         # Health check stays open so hosting platforms can probe liveness
         # without needing a credential.
         if path == "/healthz":
@@ -590,8 +599,49 @@ async def health(_request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "service": "mcp-code-analysis-server"})
 
 
+def demo_page(_request: Request) -> HTMLResponse:
+    return HTMLResponse(DEMO_HTML)
+
+
+async def demo_scan(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise InputValidationError("Expected an object with code and filename")
+        result = await analyze_code_snippet(body.get("code", ""), body.get("filename", "example.py"))
+        return JSONResponse(result)
+    except (InputValidationError, ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+DEMO_HTML = '''<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Code Analysis · Live demo</title>
+<style>
+body{margin:0;background:#101923;color:#e9f0f6;font:16px system-ui,sans-serif}
+main{max-width:880px;margin:60px auto;padding:0 24px}h1{font-size:44px;margin:12px 0}
+p{color:#b8c8d6;line-height:1.6}.badge{color:#7be0ba}section{background:#192634;border:1px solid #324253;border-radius:16px;padding:24px;margin:24px 0}
+label{display:block;margin:16px 0 8px}input,textarea{box-sizing:border-box;width:100%;padding:12px;background:#101923;color:#e9f0f6;border:1px solid #506277;border-radius:8px;font:15px monospace}textarea{min-height:160px}
+button{padding:12px 22px;margin-top:18px;background:#7be0ba;color:#10271f;border:0;border-radius:8px;font-weight:700;cursor:pointer}button:disabled{opacity:.5}pre{white-space:pre-wrap;overflow-wrap:anywhere}a{color:#7be0ba}
+</style><main><span class="badge" id="health">Checking server…</span>
+<h1>Code analysis, live.</h1><p>Try a Python snippet with Ruff and Semgrep. Find lint issues and potential security problems without executing the code.</p>
+<section><h2>Try the analyzers</h2><p>Enter your demo access token to run a live scan. It stays in this page's memory and is sent only to this server.</p>
+<form id="scan"><label for="token">Access token</label><input id="token" type="password" autocomplete="off" required placeholder="Paste your bearer token">
+<label for="code">Python snippet</label><textarea id="code" spellcheck="false">import os
+password = "example-only"
+eval("1 + 1")</textarea><button id="run">Analyze snippet</button></form>
+<pre id="result" role="status" aria-live="polite">Results will appear here.</pre></section>
+<section><h2>Connect an MCP client</h2><p>Transport: SSE<br>Endpoint: <code id="endpoint"></code><br>Header: <code>Authorization: Bearer YOUR_TOKEN</code></p><p>Tools: analyze_code_snippet · analyze_github_repo</p></section></main>
+<script>
+document.getElementById('endpoint').textContent=location.origin+'/sse';
+fetch('/healthz').then(r=>{if(!r.ok)throw Error();return r.json()}).then(()=>document.getElementById('health').textContent='● Server online').catch(()=>document.getElementById('health').textContent='Server is waking up. Refresh in a moment.');
+document.getElementById('scan').onsubmit=async e=>{e.preventDefault();const out=document.getElementById('result'),button=document.getElementById('run');button.disabled=true;out.textContent='Analyzing…';try{const token=document.getElementById('token').value.trim().replace(/^Bearer +/i,'');const r=await fetch('/demo/scan',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({filename:'example.py',code:document.getElementById('code').value})});if(r.status===401){out.textContent='That token was not recognized. Check your demo access token and try again.';return}if(!r.ok)throw Error('Scan unavailable ('+r.status+'). Please try again.');const data=await r.json();out.textContent=JSON.stringify(data,null,2)}catch(err){out.textContent=err.message}finally{button.disabled=false}};
+</script></html>'''
+
+
 starlette_app = Starlette(
     routes=[
+        Route("/demo/scan", endpoint=demo_scan, methods=["POST"]),
         Route("/sse", endpoint=handle_sse, methods=["GET"]),
         Mount("/messages/", app=sse_transport.handle_post_message),
         Route("/healthz", endpoint=health, methods=["GET"]),

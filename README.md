@@ -58,7 +58,9 @@ the token out of Git. The deployed endpoints are:
 - MCP SSE: https://petsan-mcp-code-analysis.fly.dev/sse
 
 The MCP client must support SSE and send `Authorization: Bearer <token>`
-on both the SSE connection and message POSTs. There is no browser UI.
+on both the SSE connection and message POSTs. A browser demo is available at
+https://petsan-mcp-code-analysis.fly.dev/ (and at /sse for HTML requests).
+Paste the bearer token into the demo to run a live snippet scan.
 
 The setuptools pin preserves `pkg_resources`, which the pinned Semgrep
 OpenTelemetry dependency still imports; setuptools 82 and later removed it.
