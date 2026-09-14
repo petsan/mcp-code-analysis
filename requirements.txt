@@ -14,3 +14,5 @@ sse-starlette==2.2.1
 # semgrep additionally needs its own runtime, see Dockerfile comments)
 ruff==0.9.4
 semgrep==1.107.0
+# Semgrep's pinned OpenTelemetry dependency still imports pkg_resources.
+setuptools==80.10.2

@@ -39,6 +39,30 @@ docker run -p 8000:8000 mcp-code-analysis
 Works as-is on Render, Railway, Fly.io, or an EC2 instance with the container
 runtime of your choice. Set `PORT` if your platform injects a different port.
 
+### Fly.io test deployment
+
+The included `fly.toml` targets `petsan-mcp-code-analysis` in Los Angeles,
+with one shared CPU and 1 GB RAM. The machine stops when idle and starts on
+incoming requests. Fly.io usage charges apply.
+
+After signing in with `fly auth login`, deploy updates from this directory:
+
+```bash
+fly deploy --remote-only --ha=false
+```
+
+Set `BEARER_TOKENS` through Fly secrets before the first deployment. Keep
+the token out of Git. The deployed endpoints are:
+
+- Health: https://petsan-mcp-code-analysis.fly.dev/healthz
+- MCP SSE: https://petsan-mcp-code-analysis.fly.dev/sse
+
+The MCP client must support SSE and send `Authorization: Bearer <token>`
+on both the SSE connection and message POSTs. There is no browser UI.
+
+The setuptools pin preserves `pkg_resources`, which the pinned Semgrep
+OpenTelemetry dependency still imports; setuptools 82 and later removed it.
+
 ## Security model — read before exposing this publicly
 
 This server does **not** execute untrusted code. `ruff` and `semgrep` are

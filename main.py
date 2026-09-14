@@ -253,7 +253,8 @@ async def _scan_path(target_path: str, single_file: bool) -> dict[str, Any]:
             run_ruff = False  # skip the subprocess entirely if there's nothing for ruff to lint
 
     if run_ruff:
-        ruff_args = ["ruff", "check", "--output-format=json", target_path]
+        # Scan targets are temporary; avoid writing a cache in the app directory.
+        ruff_args = ["ruff", "check", "--no-cache", "--output-format=json", target_path]
         try:
             rc, out, err = await _run_subprocess(ruff_args, timeout=SUBPROCESS_TIMEOUT_SECONDS)
             if rc not in (0, 1):  # 0 = clean, 1 = findings; anything else is a real error
