@@ -600,7 +600,19 @@ async def health(_request: Request) -> JSONResponse:
 
 
 def demo_page(_request: Request) -> HTMLResponse:
-    return HTMLResponse(DEMO_HTML)
+    html = DEMO_HTML
+    if ALLOW_NO_AUTH and not BEARER_TOKENS:
+        html = html.replace(
+            "Enter your demo access token to run a live scan. It stays in this page's memory and is sent only to this server.",
+            "Public demo mode is temporarily enabled. Run a live scan without an access token.",
+        ).replace(
+            '<label for="token">Access token</label><input id="token" type="password" autocomplete="off" required placeholder="Paste your bearer token">',
+            '<input id="token" type="hidden" value="">',
+        ).replace(
+            'Header: <code>Authorization: Bearer YOUR_TOKEN</code>',
+            'Authentication: temporarily disabled',
+        )
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 async def demo_scan(request: Request) -> JSONResponse:
