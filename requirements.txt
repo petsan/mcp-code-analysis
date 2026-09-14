@@ -1,0 +1,16 @@
+# Pinned to the stable pre-2.x MCP Python SDK API (list_tools/call_tool decorators,
+# SseServerTransport). mcp>=2.0 renamed/restructured this API (FastMCP -> MCPServer,
+# mcp.types -> mcp_types) — do not upgrade past the 1.x line without rewriting main.py
+# against the new API. Bumped from 1.6.0 to 1.30.0 (latest 1.x) specifically to get
+# mcp.server.transport_security.TransportSecuritySettings, which does not exist
+# before 1.10.0 — confirmed by testing against 1.6.0, 1.9.0 (absent) and 1.10.0+ (present).
+mcp==1.30.0
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+starlette==0.41.3
+sse-starlette==2.2.1
+
+# Analyzer CLIs (also installed as system-available binaries in the Dockerfile;
+# semgrep additionally needs its own runtime, see Dockerfile comments)
+ruff==0.9.4
+semgrep==1.107.0

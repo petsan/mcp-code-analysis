@@ -1,0 +1,43 @@
+# Minimal starter ruleset for fully offline / network-restricted deployments.
+# Point SEMGREP_CONFIG at this file's path (baked into the image by the
+# Dockerfile) to avoid any dependency on semgrep's online registry.
+#
+# This is intentionally small — extend it with rules relevant to your stack.
+# Semgrep's rule syntax reference: https://semgrep.dev/docs/writing-rules/overview
+rules:
+  - id: hardcoded-secret-assignment
+    patterns:
+      - pattern: $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(password|secret|token|api_key|apikey)
+    message: >-
+      Possible hardcoded credential. Load secrets from environment variables
+      or a secrets manager instead of embedding them in source.
+    languages: [python, javascript, typescript]
+    severity: ERROR
+
+  - id: python-shell-injection
+    pattern: subprocess.$FUNC(..., shell=True, ...)
+    message: >-
+      subprocess call with shell=True can allow shell injection if any
+      argument includes unsanitized input. Prefer shell=False with an
+      argument list.
+    languages: [python]
+    severity: ERROR
+
+  - id: python-eval-exec
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+    message: >-
+      Use of eval()/exec() on dynamic input is a common code-injection
+      vector. Avoid evaluating untrusted strings as code.
+    languages: [python]
+    severity: WARNING
+
+  - id: js-eval
+    pattern: eval(...)
+    message: Use of eval() on dynamic input is a common code-injection vector.
+    languages: [javascript, typescript]
+    severity: WARNING
