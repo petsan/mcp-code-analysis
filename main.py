@@ -663,22 +663,48 @@ document.getElementById('endpoint').textContent=location.origin+'/sse';
 fetch('/healthz').then(r=>{if(!r.ok)throw Error();return r.json()}).then(()=>document.getElementById('health').textContent='● Server online').catch(()=>document.getElementById('health').textContent='Server is waking up. Refresh in a moment.');
 function node(tag,text,className){const el=document.createElement(tag);el.textContent=text;if(className)el.className=className;return el}
 document.getElementById('mode').onchange=()=>{const repo=document.getElementById('mode').value==='repository';document.getElementById('repo-fields').hidden=!repo;document.getElementById('snippet-fields').hidden=repo;document.getElementById('repo-url').required=repo;document.getElementById('repo-url').disabled=!repo;document.getElementById('github-token').disabled=!repo;document.getElementById('commit').disabled=!repo;document.getElementById('run').textContent=repo?'Analyze repository':'Analyze snippet'};
+function groupFailures(items,isError=false){
+ const groups=new Map();
+ for(const item of items){
+  const message=String(isError?(item.error||item):(item.message||item.parse_error||'Finding returned without a description.'));
+  const tool=item.tool||'Analyzer',severity=String(item.severity||'info').toLowerCase();
+  const key=JSON.stringify([tool,severity,isError?'error':'finding',!isError&&item.rule?item.rule:message.replace(/\\s+/g,' ').trim()]);
+  if(!groups.has(key))groups.set(key,{tool,severity,rule:item.rule||'',message,items:[]});
+  groups.get(key).items.push(item);
+ }
+ return [...groups.values()].sort((a,b)=>b.items.length-a.items.length);
+}
 function renderResults(data){
  const out=document.getElementById('result');out.replaceChildren();
  const findings=data.findings||[],errors=data.errors||[];
  if(data.error){out.append(node('p',data.error));return}
+ const groups=groupFailures(findings),errorGroups=groupFailures(errors,true);
  if(data.repo)out.append(node('p',data.repo+' · Commit '+data.commit_hash));
- out.append(node('div',findings.length+' finding'+(findings.length===1?'':'s')+(errors.length?' · Scan incomplete':''),'summary'));
+ out.append(node('div',findings.length+' finding'+(findings.length===1?'':'s')+' in '+groups.length+' group'+(groups.length===1?'':'s')+(errors.length?' · Scan incomplete':''),'summary'));
  if(!findings.length)out.append(node('p',errors.length?'No findings returned. Review the scan errors below.':'No issues found by the configured rules.'));
- for(const finding of findings){
-  const card=node('article','','finding'),severity=String(finding.severity||'info').toLowerCase();
-  card.append(node('span',severity,'pill '+(['error','warning'].includes(severity)?severity:'')),node('span',finding.tool||'Analyzer','pill'));
-  card.append(node('p',finding.message||finding.parse_error||'Finding returned without a description.'));
-  const file=String(finding.filename||data.filename||'').split('/').pop();
-  card.append(node('small',[file,finding.line?'Line '+finding.line+(finding.column?', column '+finding.column:''):'',finding.rule||''].filter(Boolean).join(' · ')));out.append(card);
+ for(const group of groups){
+  const card=node('article','','finding'),severity=group.severity;
+  card.append(node('span',severity,'pill '+(['error','warning'].includes(severity)?severity:'')),node('span',group.tool,'pill'),node('span',group.items.length+' occurrence'+(group.items.length===1?'':'s'),'pill'));
+  if(group.rule)card.append(node('strong',group.rule));
+  card.append(node('p',group.message));
+  const locations=node('details'),list=node('ul');
+  locations.append(node('summary','View '+group.items.length+' occurrence'+(group.items.length===1?'':'s')));
+  for(const finding of group.items){
+   const file=String(finding.filename||data.filename||'Unknown file');
+   const location=[file,finding.line?'Line '+finding.line+(finding.column?', column '+finding.column:''):''].filter(Boolean).join(' · ');
+   const entry=node('li');entry.append(node('small',location));
+   const message=finding.message||finding.parse_error;
+   if(message&&message!==group.message)entry.append(node('p',message));
+   list.append(entry);
+  }
+  locations.append(list);if(group.items.length===1)locations.open=true;
+  card.append(locations);out.append(card);
  }
- for(const error of errors){const card=node('article','','finding scan-error');card.append(node('strong',(error.tool||'Analyzer')+' could not complete'),node('p',error.error||String(error)));out.append(card)}
- if(data.error)out.append(node('p',data.error));
+ for(const group of errorGroups){
+  const card=node('article','','finding scan-error');
+  card.append(node('strong',group.tool+' could not complete'),node('span',group.items.length+' occurrence'+(group.items.length===1?'':'s'),'pill'),node('p',group.message));
+  out.append(card);
+ }
  document.getElementById('raw-json').textContent=JSON.stringify(data,null,2);document.getElementById('raw').hidden=false;
 }
 document.getElementById('scan').onsubmit=async e=>{e.preventDefault();const out=document.getElementById('result'),button=document.getElementById('run'),raw=document.getElementById('raw');raw.hidden=true;raw.open=false;button.disabled=true;out.textContent='Analyzing…';try{const token=document.getElementById('token').value.trim().replace(/^Bearer +/i,'');const r=await fetch('/demo/scan',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(document.getElementById('mode').value==='repository'?{mode:'repository',repo_url:document.getElementById('repo-url').value.trim(),commit_hash:document.getElementById('commit').value.trim(),github_token:document.getElementById('github-token').value.trim()}:{mode:'snippet',filename:'example.py',code:document.getElementById('code').value})});if(r.status===401){out.textContent='That token was not recognized. Check your demo access token and try again.';return}const data=await r.json();if(!r.ok)throw Error(data.error||'Scan unavailable ('+r.status+'). Please try again.');renderResults(data)}catch(err){out.textContent=err.message}finally{button.disabled=false;document.getElementById('github-token').value=''}};
