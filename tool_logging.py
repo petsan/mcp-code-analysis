@@ -8,14 +8,14 @@ import uuid
 logger = logging.getLogger("mcp-code-analysis")
 
 
-async def run_logged_subprocess(args, cwd=None, timeout=30):
+async def run_logged_subprocess(args, cwd=None, timeout=30, env=None, log_output=True):
     run_id = uuid.uuid4().hex[:12]
     tool = args[0]
     started = time.monotonic()
     logger.info("run=%s tool=%s started", run_id, tool)
     try:
         proc = await asyncio.create_subprocess_exec(
-            *args, cwd=cwd, stdout=asyncio.subprocess.PIPE,
+            *args, cwd=cwd, env=env, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
     except OSError:
@@ -27,8 +27,9 @@ async def run_logged_subprocess(args, cwd=None, timeout=30):
         while chunk := await stream.read(4096):
             chunks.append(chunk)
             # repr escaping prevents child output from forging log lines.
-            logger.info("run=%s tool=%s stream=%s output=%r",
-                        run_id, tool, label, chunk.decode("utf-8", "replace"))
+            if log_output:
+                logger.info("run=%s tool=%s stream=%s output=%r",
+                            run_id, tool, label, chunk.decode("utf-8", "replace"))
         return b"".join(chunks).decode("utf-8", "replace")
 
     async def collect():

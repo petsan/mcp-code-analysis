@@ -4,7 +4,7 @@ A FastAPI/Starlette web server exposing a Model Context Protocol (MCP) server
 over HTTP Server-Sent Events, with two tools backed by `ruff` and `semgrep`:
 
 - `analyze_code_snippet(code_content, filename)` — scans a raw source string.
-- `analyze_github_repo(repo_url)` — shallow-clones a **public** GitHub repo and scans it.
+- `analyze_github_repo(repo_url, commit_hash="", github_token="")` — scans the whole repository at its default branch or a specified commit.
 
 ## Endpoints
 
@@ -233,3 +233,31 @@ Output is streamed in chunks; child-process buffering can delay its arrival.
 Scanner output may contain source excerpts and filenames, so treat these logs
 as having the same sensitivity as the analyzed code. Request arguments and
 authentication tokens are not explicitly logged.
+
+## Repository and commit scans
+
+In the browser demo choose **Whole GitHub repository**, enter its HTTPS URL,
+and optionally paste a full 40-character commit hash. A blank hash selects the
+latest default-branch commit. Results include the resolved `commit_hash`.
+This scans the entire snapshot, not just the commit diff or every historical
+revision. Existing file/size limits apply; submodules are not fetched.
+
+For private repositories, paste a GitHub personal access token into the optional
+password field. Use a fine-grained token limited to the selected repositories,
+with **Contents: read** permission. Organization approval may be required.
+See https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens.
+This is separate from the server's bearer access token.
+
+Tokens are sent over HTTPS for one request, never saved by the server, and
+cleared from the form afterward. MCP clients can supply `github_token` as an
+optional tool argument; clients may retain tool arguments in their own history.
+The server does not fall back to ambient GitHub credentials. Authenticated Git
+commands log lifecycle events but suppress raw output to avoid exposing tokens.
+Ruff/Semgrep logs can contain private source excerpts; use this only on a server
+whose operators you trust with that repository's contents.
+
+Example MCP arguments (public repository):
+
+```json
+{"repo_url": "https://github.com/petsan/mcp-code-analysis", "commit_hash": ""}
+```

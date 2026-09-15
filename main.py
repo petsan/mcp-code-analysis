@@ -3,7 +3,7 @@ MCP Code Analysis Server — SSE transport over FastAPI/Starlette.
 
 Exposes two tools over the Model Context Protocol:
   - analyze_code_snippet: lint/scan a raw source string with Ruff + Semgrep
-  - analyze_github_repo:  shallow-clone a *public* GitHub repo and scan it
+  - analyze_github_repo:  fetch a GitHub snapshot (optionally authenticated) and scan it
 
 SECURITY NOTE (read this before deploying):
 This process runs Ruff and Semgrep as subprocesses with a wall-clock timeout.
@@ -14,7 +14,7 @@ reasonable risk to take. This design does NOT execute untrusted code and must
 never be extended to add a "run this snippet" tool without a real sandbox
 (gVisor, Firecracker, a container-per-request model, etc).
 
-The GitHub-repo tool clones arbitrary public repositories. Cloning itself can
+The GitHub-repo tool fetches user-selected GitHub repositories. Cloning itself can
 still be abused (huge repos, git attacks, malicious .gitattributes/hooks), so
 we clone with hooks disabled, no submodules, depth=1, and hard caps on repo
 size and file count before any scanner ever touches the checkout.
@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from tool_logging import run_logged_subprocess
+from repository import checkout_repository, RepositoryError
 
 import mcp.types as types
 from mcp.server.lowlevel import Server
@@ -109,7 +110,7 @@ logger = logging.getLogger("mcp-code-analysis")
 # --------------------------------------------------------------------------
 
 
-class InputValidationError(ValueError):
+class InputValidationError(RepositoryError):
     """Raised when a tool argument fails validation. Caught and reported as a tool error."""
 
 
@@ -132,10 +133,12 @@ def _validate_filename(filename: str) -> str:
 
 
 def _validate_github_url(url: str) -> tuple[str, str]:
-    match = _GITHUB_URL_RE.match(url.strip())
+    if not isinstance(url, str):
+        raise InputValidationError("repo_url must be a string")
+    match = _GITHUB_URL_RE.fullmatch(url.strip())
     if not match:
         raise InputValidationError(
-            "repo_url must be a public GitHub HTTPS URL of the form "
+            "repo_url must be a GitHub HTTPS URL of the form "
             "'https://github.com/<owner>/<repo>'."
         )
     return match.group("owner"), match.group("repo")
@@ -332,28 +335,15 @@ async def analyze_code_snippet(code_content: str, filename: str) -> dict[str, An
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-async def analyze_github_repo(repo_url: str) -> dict[str, Any]:
+async def analyze_github_repo(repo_url: str, commit_hash: str = "", github_token: str = "") -> dict[str, Any]:
     owner, repo = _validate_github_url(repo_url)
     clone_url = f"https://github.com/{owner}/{repo}.git"
 
     tmp_dir = tempfile.mkdtemp(prefix="mcp-repo-")
     try:
-        clone_args = [
-            "git",
-            "clone",
-            "--depth=1",
-            "--single-branch",
-            "--no-tags",
-            "-c",
-            "core.hooksPath=/dev/null",  # disable any hook execution
-            clone_url,
-            tmp_dir + "/checkout",
-        ]
-        rc, out, err = await _run_subprocess(clone_args, timeout=CLONE_TIMEOUT_SECONDS)
-        if rc != 0:
-            raise InputValidationError(f"git clone failed: {err.strip()[:1000] or 'unknown error'}")
-
         checkout_path = Path(tmp_dir) / "checkout"
+        resolved_commit = await checkout_repository(
+            clone_url, str(checkout_path), commit_hash, github_token, CLONE_TIMEOUT_SECONDS)
         # Remove .git entirely — we only want working-tree content, and this
         # keeps hooks/config/objects out of reach of the scanners.
         shutil.rmtree(checkout_path / ".git", ignore_errors=True)
@@ -371,6 +361,7 @@ async def analyze_github_repo(repo_url: str) -> dict[str, Any]:
         scan_result = await _scan_path(str(checkout_path), single_file=False)
         return {
             "repo": f"{owner}/{repo}",
+            "commit_hash": resolved_commit,
             "file_count": file_count,
             "total_bytes": total_bytes,
             **scan_result,
@@ -416,16 +407,24 @@ TOOLS: list[types.Tool] = [
     types.Tool(
         name="analyze_github_repo",
         description=(
-            "Shallow-clone a PUBLIC GitHub repository and scan it with Ruff and Semgrep. "
-            "Subject to file-count and total-size caps; private repos and non-GitHub URLs "
-            "are rejected."
+            "Scan a whole GitHub repository at its default branch or a specific commit. "
+            "Private repositories require a request-scoped github_token. "
+            "Subject to file-count and total-size caps; only GitHub HTTPS URLs are accepted."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "repo_url": {
                     "type": "string",
-                    "description": "Public repo URL, e.g. 'https://github.com/owner/repo'.",
+                    "description": "GitHub repo URL, e.g. 'https://github.com/owner/repo'.",
+                },
+                "commit_hash": {
+                    "type": "string",
+                    "description": "Optional full 40-character commit hash; blank scans the default branch.",
+                },
+                "github_token": {
+                    "type": "string",
+                    "description": "Optional GitHub token with Contents: read access for private repositories. Never returned or stored by the server.",
                 },
             },
             "required": ["repo_url"],
@@ -451,7 +450,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
                 filename=arguments.get("filename", ""),
             )
         elif name == "analyze_github_repo":
-            result = await analyze_github_repo(repo_url=arguments.get("repo_url", ""))
+            result = await analyze_github_repo(
+                repo_url=arguments.get("repo_url", ""),
+                commit_hash=arguments.get("commit_hash", ""),
+                github_token=arguments.get("github_token", ""))
         else:
             raise InputValidationError(f"unknown tool: {name}")
 
@@ -459,7 +461,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
                     result.get("finding_count", 0), len(result.get("errors", [])))
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
-    except InputValidationError as exc:
+    except RepositoryError as exc:
         logger.info("validation error in tool %s: %s", name, exc)
         return [types.TextContent(type="text", text=json.dumps({"error": str(exc)}, indent=2))]
     except Exception as exc:  # noqa: BLE001 — convert any unexpected failure into a tool error
@@ -619,9 +621,15 @@ async def demo_scan(request: Request) -> JSONResponse:
         body = await request.json()
         if not isinstance(body, dict):
             raise InputValidationError("Expected an object with code and filename")
-        result = await analyze_code_snippet(body.get("code", ""), body.get("filename", "example.py"))
-        return JSONResponse(result)
-    except (InputValidationError, ValueError, TypeError) as exc:
+        if body.get("mode", "snippet") == "repository":
+            result = await analyze_github_repo(body.get("repo_url", ""),
+                body.get("commit_hash", ""), body.get("github_token", ""))
+        elif body.get("mode", "snippet") == "snippet":
+            result = await analyze_code_snippet(body.get("code", ""), body.get("filename", "example.py"))
+        else:
+            raise InputValidationError("Unknown scan mode")
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+    except (RepositoryError, ValueError, TypeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
@@ -632,25 +640,34 @@ DEMO_HTML = '''<!doctype html>
 body{margin:0;background:#101923;color:#e9f0f6;font:16px system-ui,sans-serif}
 main{max-width:880px;margin:60px auto;padding:0 24px}h1{font-size:44px;margin:12px 0}
 p{color:#b8c8d6;line-height:1.6}.badge{color:#7be0ba}section{background:#192634;border:1px solid #324253;border-radius:16px;padding:24px;margin:24px 0}
-label{display:block;margin:16px 0 8px}input,textarea{box-sizing:border-box;width:100%;padding:12px;background:#101923;color:#e9f0f6;border:1px solid #506277;border-radius:8px;font:15px monospace}textarea{min-height:160px}
+label{display:block;margin:16px 0 8px}input,textarea,select{box-sizing:border-box;width:100%;padding:12px;background:#101923;color:#e9f0f6;border:1px solid #506277;border-radius:8px;font:15px monospace}textarea{min-height:160px}
 button{padding:12px 22px;margin-top:18px;background:#7be0ba;color:#10271f;border:0;border-radius:8px;font-weight:700;cursor:pointer}button:disabled{opacity:.5}pre{white-space:pre-wrap;overflow-wrap:anywhere}a{color:#7be0ba}
 .finding{background:#101923;border:1px solid #324253;border-radius:10px;padding:16px;margin:12px 0}.finding p{margin:10px 0 0;color:#e9f0f6}.finding small{display:block;color:#b8c8d6;margin-top:8px;overflow-wrap:anywhere}.pill{display:inline-block;border-radius:5px;padding:3px 8px;margin-right:8px;font-size:12px;font-weight:700;text-transform:uppercase;background:#34475a;color:#dbeafa}.pill.error{background:#592d37;color:#ffb8c4}.pill.warning{background:#514128;color:#ffdc97}.summary{font-size:20px;font-weight:650;margin:20px 0 8px}.scan-error{border-color:#b18a48}details{margin-top:20px;border-top:1px solid #324253;padding-top:16px}summary{cursor:pointer;color:#7be0ba}summary:focus-visible{outline:2px solid #7be0ba;outline-offset:4px}#result{margin-top:20px}
 </style><main><span class="badge" id="health">Checking server…</span>
-<h1>Code analysis, live.</h1><p>Try a Python snippet with Ruff and Semgrep. Find lint issues and potential security problems without executing the code.</p>
+<h1>Code analysis, live.</h1><p>Scan a snippet or a whole GitHub repository with Ruff and Semgrep. Find lint issues and potential security problems without executing the code.</p>
 <section><h2>Try the analyzers</h2><p>Enter your demo access token to run a live scan. It stays in this page's memory and is sent only to this server.</p>
 <form id="scan"><label for="token">Access token</label><input id="token" type="password" autocomplete="off" required placeholder="Paste your bearer token">
-<label for="code">Python snippet</label><textarea id="code" spellcheck="false">import os
+<label for="mode">What to analyze</label><select id="mode"><option value="snippet">Code snippet</option><option value="repository">Whole GitHub repository</option></select>
+<div id="repo-fields" hidden><label for="repo-url">GitHub repository URL</label><input id="repo-url" type="url" placeholder="https://github.com/owner/repo">
+<label for="commit">Commit hash (optional)</label><input id="commit" maxlength="40" pattern="[0-9a-fA-F]{40}" placeholder="Leave blank for the default branch">
+<p>Scans all supported files at the selected commit, subject to size limits. Copy the full 40-character hash from GitHub.</p>
+<label for="github-token">GitHub access token (private repositories)</label><input id="github-token" type="password" autocomplete="off" placeholder="Optional for public repositories">
+<p>Use a token with Contents: read access to the selected repository. It is sent only for this scan and cleared from the form afterward. Scanner logs may contain source excerpts.</p></div>
+<div id="snippet-fields"><label for="code">Python snippet</label><textarea id="code" spellcheck="false">import os
 password = "example-only"
-eval("1 + 1")</textarea><button id="run">Analyze snippet</button></form>
+eval("1 + 1")</textarea></div><button id="run">Analyze snippet</button></form>
 <div id="result" role="status" aria-live="polite">Results will appear here.</div><details id="raw" hidden><summary>View raw JSON</summary><pre id="raw-json"></pre></details></section>
 <section><h2>Connect an MCP client</h2><p>Transport: SSE<br>Endpoint: <code id="endpoint"></code><br>Header: <code>Authorization: Bearer YOUR_TOKEN</code></p><p>Tools: analyze_code_snippet · analyze_github_repo</p></section></main>
 <script>
 document.getElementById('endpoint').textContent=location.origin+'/sse';
 fetch('/healthz').then(r=>{if(!r.ok)throw Error();return r.json()}).then(()=>document.getElementById('health').textContent='● Server online').catch(()=>document.getElementById('health').textContent='Server is waking up. Refresh in a moment.');
 function node(tag,text,className){const el=document.createElement(tag);el.textContent=text;if(className)el.className=className;return el}
+document.getElementById('mode').onchange=()=>{const repo=document.getElementById('mode').value==='repository';document.getElementById('repo-fields').hidden=!repo;document.getElementById('snippet-fields').hidden=repo;document.getElementById('repo-url').required=repo;document.getElementById('repo-url').disabled=!repo;document.getElementById('github-token').disabled=!repo;document.getElementById('commit').disabled=!repo;document.getElementById('run').textContent=repo?'Analyze repository':'Analyze snippet'};
 function renderResults(data){
  const out=document.getElementById('result');out.replaceChildren();
  const findings=data.findings||[],errors=data.errors||[];
+ if(data.error){out.append(node('p',data.error));return}
+ if(data.repo)out.append(node('p',data.repo+' · Commit '+data.commit_hash));
  out.append(node('div',findings.length+' finding'+(findings.length===1?'':'s')+(errors.length?' · Scan incomplete':''),'summary'));
  if(!findings.length)out.append(node('p',errors.length?'No findings returned. Review the scan errors below.':'No issues found by the configured rules.'));
  for(const finding of findings){
@@ -664,7 +681,7 @@ function renderResults(data){
  if(data.error)out.append(node('p',data.error));
  document.getElementById('raw-json').textContent=JSON.stringify(data,null,2);document.getElementById('raw').hidden=false;
 }
-document.getElementById('scan').onsubmit=async e=>{e.preventDefault();const out=document.getElementById('result'),button=document.getElementById('run'),raw=document.getElementById('raw');raw.hidden=true;raw.open=false;button.disabled=true;out.textContent='Analyzing…';try{const token=document.getElementById('token').value.trim().replace(/^Bearer +/i,'');const r=await fetch('/demo/scan',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({filename:'example.py',code:document.getElementById('code').value})});if(r.status===401){out.textContent='That token was not recognized. Check your demo access token and try again.';return}if(!r.ok)throw Error('Scan unavailable ('+r.status+'). Please try again.');renderResults(await r.json())}catch(err){out.textContent=err.message}finally{button.disabled=false}};
+document.getElementById('scan').onsubmit=async e=>{e.preventDefault();const out=document.getElementById('result'),button=document.getElementById('run'),raw=document.getElementById('raw');raw.hidden=true;raw.open=false;button.disabled=true;out.textContent='Analyzing…';try{const token=document.getElementById('token').value.trim().replace(/^Bearer +/i,'');const r=await fetch('/demo/scan',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(document.getElementById('mode').value==='repository'?{mode:'repository',repo_url:document.getElementById('repo-url').value.trim(),commit_hash:document.getElementById('commit').value.trim(),github_token:document.getElementById('github-token').value.trim()}:{mode:'snippet',filename:'example.py',code:document.getElementById('code').value})});if(r.status===401){out.textContent='That token was not recognized. Check your demo access token and try again.';return}const data=await r.json();if(!r.ok)throw Error(data.error||'Scan unavailable ('+r.status+'). Please try again.');renderResults(data)}catch(err){out.textContent=err.message}finally{button.disabled=false;document.getElementById('github-token').value=''}};
 </script></html>'''
 
 
