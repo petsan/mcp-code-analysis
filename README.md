@@ -215,3 +215,21 @@ That's an acceptable trade-off for two static analyzers, but:
 - **Not tested here:** the Docker build itself (no `docker` binary available
   in this sandbox) — every dependency it installs was verified individually
   instead.
+# Tool execution logs
+
+Tool calls log their start, result counts, and elapsed time at INFO level.
+Git, Ruff, and Semgrep log their start, stdout/stderr as it becomes available,
+exit code, and elapsed time. Each subprocess has a unique `run` ID to distinguish
+concurrent executions. Timeouts and cancellations are logged and terminate the
+child process. Analyzer JSON responses remain unchanged.
+
+View these server logs on Fly with:
+
+```sh
+fly logs -a petsan-mcp-code-analysis
+```
+
+Output is streamed in chunks; child-process buffering can delay its arrival.
+Scanner output may contain source excerpts and filenames, so treat these logs
+as having the same sensitivity as the analyzed code. Request arguments and
+authentication tokens are not explicitly logged.

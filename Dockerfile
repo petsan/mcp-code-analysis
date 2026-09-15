@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # fails the build instead of failing silently at request time.
 RUN ruff --version && semgrep --version
 
-COPY main.py .
+COPY main.py tool_logging.py ./
 COPY semgrep-rules.yml .
 
 # Fully offline by default: point SEMGREP_CONFIG at the bundled starter

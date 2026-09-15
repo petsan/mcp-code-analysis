@@ -30,9 +30,12 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+from tool_logging import run_logged_subprocess
 
 import mcp.types as types
 from mcp.server.lowlevel import Server
@@ -148,23 +151,12 @@ async def _run_subprocess(
     which are converted to a structured error by the caller.
     """
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        return await run_logged_subprocess(args, cwd=cwd, timeout=timeout)
     except FileNotFoundError as exc:
         raise RuntimeError(f"required binary not found: {args[0]}") from exc
 
-    try:
-        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
         raise TimeoutError(f"'{' '.join(args)}' exceeded {timeout}s timeout and was killed")
-
-    return proc.returncode, stdout_b.decode("utf-8", "replace"), stderr_b.decode("utf-8", "replace")
 
 
 def _parse_ruff_json(stdout: str) -> list[dict[str, Any]]:
@@ -272,7 +264,6 @@ async def _scan_path(target_path: str, single_file: bool) -> dict[str, Any]:
         "scan",
         f"--config={SEMGREP_CONFIG}",
         "--json",
-        "--quiet",
         "--timeout",
         str(max(1, SUBPROCESS_TIMEOUT_SECONDS - 5)),
         target_path,
@@ -450,6 +441,9 @@ async def list_tools() -> list[types.Tool]:
 
 @app_server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
+    call_id = uuid.uuid4().hex[:12]
+    started = time.monotonic()
+    logger.info("call=%s tool=%r started", call_id, name)
     try:
         if name == "analyze_code_snippet":
             result = await analyze_code_snippet(
@@ -461,6 +455,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
         else:
             raise InputValidationError(f"unknown tool: {name}")
 
+        logger.info("call=%s tool=%r completed findings=%s errors=%s", call_id, name,
+                    result.get("finding_count", 0), len(result.get("errors", [])))
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
     except InputValidationError as exc:
@@ -474,6 +470,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
                 text=json.dumps({"error": f"internal error: {exc}"}, indent=2),
             )
         ]
+    finally:
+        logger.info("call=%s tool=%r ended elapsed=%.3fs", call_id, name,
+                    time.monotonic() - started)
 
 
 # --------------------------------------------------------------------------
